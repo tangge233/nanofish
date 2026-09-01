@@ -9,13 +9,13 @@ pub enum Error {
     /// The provided URL was invalid or malformed
     InvalidUrl,
     /// DNS resolution failed
-    DnsError(embassy_net::dns::Error),
+    DnsError,
     /// No IP addresses were returned by DNS resolution
     IpAddressEmpty,
     /// Failed to establish a TCP connection
-    ConnectionError(embassy_net::tcp::ConnectError),
+    ConnectionError,
     /// TCP communication error
-    TcpError(embassy_net::tcp::Error),
+    TcpError,
     /// No response was received from the server
     NoResponse,
     /// The server's response could not be parsed
@@ -40,21 +40,24 @@ impl defmt::Format for Error {
     }
 }
 
+#[cfg(feature = "embassy")]
 impl From<embassy_net::dns::Error> for Error {
-    fn from(err: embassy_net::dns::Error) -> Self {
-        Self::DnsError(err)
+    fn from(_err: embassy_net::dns::Error) -> Self {
+        Self::DnsError
     }
 }
 
+#[cfg(feature = "embassy")]
 impl From<embassy_net::tcp::ConnectError> for Error {
-    fn from(err: embassy_net::tcp::ConnectError) -> Self {
-        Self::ConnectionError(err)
+    fn from(_err: embassy_net::tcp::ConnectError) -> Self {
+        Self::ConnectionError
     }
 }
 
+#[cfg(feature = "embassy")]
 impl From<embassy_net::tcp::Error> for Error {
-    fn from(err: embassy_net::tcp::Error) -> Self {
-        Self::TcpError(err)
+    fn from(_err: embassy_net::tcp::Error) -> Self {
+        Self::TcpError
     }
 }
 
@@ -69,10 +72,10 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidUrl => write!(f, "Invalid URL"),
-            Self::DnsError(_) => write!(f, "DNS resolution failed"),
+            Self::DnsError => write!(f, "DNS resolution failed"),
             Self::IpAddressEmpty => write!(f, "No IP addresses returned by DNS"),
-            Self::ConnectionError(_) => write!(f, "Failed to establish TCP connection"),
-            Self::TcpError(_) => write!(f, "TCP communication error"),
+            Self::ConnectionError => write!(f, "Failed to establish TCP connection"),
+            Self::TcpError => write!(f, "TCP communication error"),
             Self::NoResponse => write!(f, "No response received from server"),
             Self::InvalidResponse(msg) => write!(f, "Invalid response: {msg}"),
             #[cfg(feature = "tls")]
@@ -88,8 +91,8 @@ impl core::fmt::Display for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use embassy_net::dns;
-    use embassy_net::tcp;
+    #[cfg(feature = "embassy")]
+    use embassy_net::{dns, tcp};
 
     #[test]
     fn test_error_display() {
@@ -109,22 +112,24 @@ mod tests {
         assert_eq!(format!("{e}"), "Invalid status code");
     }
 
+    #[cfg(feature = "embassy")]
     #[test]
     fn test_from_dns_error() {
         let dns_err = dns::Error::InvalidName;
         let err: Error = dns_err.into();
         match err {
-            Error::DnsError(_) => {}
+            Error::DnsError => {}
             _ => panic!("Expected DnsError variant"),
         }
     }
 
+    #[cfg(feature = "embassy")]
     #[test]
     fn test_from_tcp_error() {
         let tcp_err = tcp::Error::ConnectionReset;
         let err: Error = tcp_err.into();
         match err {
-            Error::TcpError(_) => {}
+            Error::TcpError => {}
             _ => panic!("Expected TcpError variant"),
         }
     }

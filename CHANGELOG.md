@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-01
+
+### Added
+
+- Added an `embassy` feature, making `embassy-net` and `embassy-time` optional dependencies.
+- Added `HttpClient` and `HttpClientRequest` for running the HTTP client over any already-connected `embedded-io-async` stream without Embassy.
+- Added `HttpTlsClient` for running TLS over any already-connected `embedded-io-async` stream without Embassy when `tls` is enabled. The client stores a `TlsVerification` policy: `TlsVerification::Verified` checks the certificate chain against a pinned root CA, the hostname, and (with a clock supplying Unix time) the validity period via `embedded-tls`'s no_std `rustpki` backend; `TlsVerification::Unverified` skips certificate checks and remains vulnerable to man-in-the-middle attacks.
+- Added `HttpServer` and `handle_http_connection()` for serving a single HTTP connection over any `embedded-io-async` stream without Embassy.
+- Added optional `smoltcp` feature with `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
+- Added `TimeoutDuration`, a transport-neutral duration type for `HttpClientOptions`.
+- Added `HttpClient::request_with_retry_delay()` and `HttpTlsClient::request_with_retry_delay()`, which sleep between read retries via a caller-provided delay; the Embassy-backed clients use this to honor `HttpClientOptions::retry_delay`.
+- Added `HttpEndpoint` and `parse_endpoint()` to the crate root re-exports.
+- Added CI coverage for `--no-default-features` and `--no-default-features --features tls`.
+- Documented the TLS verification guarantees of each `TlsVerification` policy and the man-in-the-middle risk of unverified HTTPS.
+
+### Changed
+
+- **BREAKING**: `HttpClientOptions` now uses `TimeoutDuration` instead of `embassy_time::Duration`.
+- **BREAKING**: Transport error variants no longer expose Embassy error types directly; `DnsError`, `ConnectionError`, and `TcpError` are now transport-neutral variants. Note that stream IO errors on the TLS path are now reported as `TcpError` (previously `TlsError`); TLS handshake errors remain `TlsError`.
+- **BREAKING**: The `embassy` feature is no longer enabled by default. Enable `features = ["embassy"]` to use Embassy-backed adapters.
+- **BREAKING**: Transport-generic client/server APIs dropped the `Io` infix: `HttpClient`, `HttpClientRequest`, `HttpTlsClient`, `HttpServer`, `DefaultHttpClient`, `DefaultHttpServer`, etc.
+- **BREAKING**: Embassy-backed client/server root exports are now explicitly named `DefaultEmbassyHttpClient`, `EmbassyHttpClient`, `SmallEmbassyHttpClient`, `DefaultEmbassyHttpServer`, `EmbassyHttpServer`, and `SmallEmbassyHttpServer`.
+- **BREAKING**: `ServerTimeouts` now uses `TimeoutDuration` values instead of raw `u64` seconds and is available only with the `embassy` feature; `HttpServer::with_buffer_sizes()` was renamed to `HttpServer::new()` (buffer sizes are type parameters).
+- `SmallHttpClient` now uses a 512-byte request buffer (previously identical to the 1024-byte `DefaultHttpClient`).
+- Embassy-backed clients now sleep for `HttpClientOptions::retry_delay` between read retries.
+- Embassy-backed client and server modules are now gated behind the `embassy` feature.
+- Internal layout is now hexagonal: `client/` and `server/` contain transport-neutral IO adapters plus Embassy adapters.
+
+### Fixed
+
+- Incomplete responses no longer silently return truncated bodies: the client returns `InvalidResponse` when a length-delimited body is cut short by connection close, and `BufferOverflow` when the response exceeds the caller's buffer.
+- Incomplete requests no longer silently reach the handler: the server returns `InvalidResponse` on premature close and `BufferOverflow` when a request exceeds the request buffer.
+- Fixed integer overflow in the server's request completion check for absurd `Content-Length` values.
+- Chunked responses with intermediate transfer codings (e.g. `Transfer-Encoding: gzip, chunked`) are now dechunked correctly.
+- TLS handshake seed now uses the low 32 bits of the system tick counter and never collapses to the all-zero XORShift state.
+- Removed a redundant per-response copy of the parsed header list.
+
 ## [0.12.1] - 2026-06-30
 
 ### Added
@@ -256,7 +293,7 @@ HttpResponseBuilder::new()
 
 - **BREAKING**: Added const generic parameter `RQ` for HTTP request buffer size.
 - **BREAKING**: Added const generics for TCP and TLS buffer sizes (`TCP_RX`, `TCP_TX`, `TLS_READ`, `TLS_WRITE`).
-- Introduced `DefaultHttpClient` and `SmallHttpClient` type aliases.
+- Introduced `DefaultEmbassyHttpClient` and `SmallEmbassyHttpClient` type aliases.
 
 ## [0.7.0] - 2025-04-13
 
@@ -319,7 +356,9 @@ HttpResponseBuilder::new()
 - Support for GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, and CONNECT methods.
 - Configurable client options (retries, timeouts, delays).
 
-[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/rttfd/nanofish/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/rttfd/nanofish/compare/v0.12.1...v0.13.0
+[0.12.1]: https://github.com/rttfd/nanofish/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/rttfd/nanofish/compare/v0.11.9...v0.12.0
 [0.11.9]: https://github.com/rttfd/nanofish/compare/v0.11.8...v0.11.9
 [0.11.8]: https://github.com/rttfd/nanofish/compare/v0.11.7...v0.11.8

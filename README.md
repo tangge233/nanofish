@@ -6,7 +6,7 @@
 
 # Nanofish
 
-A lightweight, `no_std` HTTP client and server for embedded systems built on Embassy networking with zero-copy response handling.
+A lightweight, `no_std` HTTP client and server for embedded systems with optional Embassy networking and zero-copy response handling.
 
 Nanofish is designed for embedded systems with limited memory. It provides a simple HTTP client and server that works without heap allocation, making it suitable for microcontrollers and `IoT` devices. The library uses zero-copy response handling where response data is borrowed directly from user-provided buffers, keeping memory usage predictable and efficient.
 
@@ -16,7 +16,8 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **User-Controlled Memory** - You provide the buffer and control exactly how much memory is used
 - **Configurable Buffer Sizes** - Compile-time buffer size configuration using const generics for optimal memory usage
 - **No Standard Library** - Full `no_std` compatibility with no heap allocations
-- **Embassy Integration** - Built on Embassy's async networking
+- **Optional Embassy Integration** - Async client/server integration built on Embassy networking; core HTTP types build without Embassy via `default-features = false`
+- **Optional smoltcp Adapter** - Wrap `smoltcp` TCP sockets as `embedded-io-async` streams for the generic client/server APIs
 - **Complete HTTP Support** - All standard HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, TRACE, CONNECT)
 - **HTTP Server** - Built-in async server with customizable timeouts and request handling
 - **Smart Response Parsing** - Automatic text/binary detection based on Content-Type headers
@@ -30,39 +31,63 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 
 ## Installation & Feature Flags
 
-### Basic HTTP Support (Default)
+### Core HTTP Support (Default, No Embassy)
 ```toml
 [dependencies]
-nanofish = "0.12"
+nanofish = "0.13"
 ```
 
 ### With TLS/HTTPS Support
 ```toml
 [dependencies]
-nanofish = { version = "0.12", features = ["tls"] }
+nanofish = { version = "0.13", features = ["tls"] }
+```
+
+### With Embassy Client/Server Integration
+```toml
+[dependencies]
+nanofish = { version = "0.13", features = ["embassy"] }
+```
+
+### With smoltcp Socket Adapter
+```toml
+[dependencies]
+nanofish = { version = "0.13", features = ["smoltcp"] }
 ```
 
 ### With Logging
 ```toml
 # Using defmt (common in embedded/probe-based workflows)
 [dependencies]
-nanofish = { version = "0.12", features = ["defmt"] }
+nanofish = { version = "0.13", features = ["defmt"] }
 
 # Using the log crate (common in std or defmt-incompatible environments)
 [dependencies]
-nanofish = { version = "0.12", features = ["log"] }
+nanofish = { version = "0.13", features = ["log"] }
 ```
 
 > **Note:** The `defmt` and `log` features are **mutually exclusive**. Enabling both will produce a compile-time error. If neither is enabled, all logging calls are compiled away to no-ops.
 
+The default build includes the transport-neutral HTTP types, parsing, response builders, handlers, headers, methods, status codes, options, and generic `embedded-io-async` client/server helpers without pulling in `embassy-net` or `embassy-time`.
+
 ### Available Features
+- **`embassy`** - Enables the Embassy-backed async client and server integration. Disabled by default.
+- **`smoltcp`** - Enables `SmolTcpStream`, an `embedded-io-async` adapter for `smoltcp` TCP sockets.
 - **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
-  - When disabled (default): Only HTTP requests are supported
-  - When enabled: Full HTTPS support with TLS 1.2/1.3
+  - When disabled: Only HTTP requests are supported
+  - When enabled: HTTPS client support with TLS 1.2/1.3 (server remains HTTP-only)
 - **`defmt`** - Enables logging via the [`defmt`](https://github.com/knurling-rs/defmt) framework (commonly used with probe-rs)
 - **`log`** - Enables logging via the [`log`](https://docs.rs/log) crate
 
-Features can be combined freely (except `defmt` + `log`), for example `features = ["tls", "defmt"]`.
+Features can be combined freely (except `defmt` + `log`), for example `features = ["smoltcp", "tls", "defmt"]`.
+
+> **TLS security note**: Convenience HTTPS clients (`EmbassyHttpClient` HTTPS paths and
+> `HttpTlsClient` built with `TlsVerification::Unverified`) do **not** verify the server
+> certificate (`embedded-tls` `UnsecureProvider`) and are vulnerable to man-in-the-middle
+> attacks; the Embassy TLS client also derives handshake randomness from the system tick
+> counter. For verified TLS over any stream — including an Embassy `TcpSocket` — build an
+> `HttpTlsClient` with `HttpTlsClient::verified(rng, &mut CertVerifier::new(root_ca))`
+> (requires a cryptographic RNG and, for expiry checks, a clock returning Unix time).
 
 ## Zero-Copy Architecture
 
@@ -88,19 +113,114 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 
 # HTTP Client
 
-## Quick Start
+## Generic IO Client Without Embassy
 
-Here's a simple example showing how to use Nanofish:
+With `default-features = false`, use `HttpClient` over any already-connected `embedded-io-async` stream. This is the non-Embassy client implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpClient`. Your platform owns DNS, TCP connection setup, timeouts, and accept loops.
+
+With `default-features = false, features = ["tls"]`, use `HttpTlsClient` / `DefaultHttpTlsClient` over an already-connected TCP-like stream. TLS is not coupled to Embassy; the client stores a `TlsVerification` policy and an RNG. With `TlsVerification::Verified` the server certificate chain, hostname, and validity period are verified against a root CA you pin (DER); with `TlsVerification::Unverified` the certificate is **not** checked (see the TLS security note above).
 
 ```rust,ignore
-use nanofish::{DefaultHttpClient, HttpHeader, ResponseBody, headers, mime_types};
+use embedded_tls::{pki::CertVerifier, Aes128GcmSha256, Certificate};
+use nanofish::{DefaultHttpTlsClient, HttpClientRequest, HttpMethod};
+
+// Clock used for certificate expiry checks; return Unix time when known.
+struct WallClock;
+impl embedded_tls::TlsClock for WallClock {
+    fn now() -> Option<u64> {
+        /* from your RTC / NTP */ None
+    }
+}
+
+async fn request<S>(
+    stream: S,
+    root_ca_der: &[u8],
+    rng: impl rand_core::CryptoRngCore,
+) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    // Verified: chain + hostname + validity against a pinned root CA.
+    let mut verifier = CertVerifier::<Aes128GcmSha256, WallClock, 4096>::new(
+        Certificate::X509(root_ca_der),
+    );
+    let mut client = DefaultHttpTlsClient::verified(rng, &mut verifier);
+    let mut response_buffer = [0u8; 4096];
+
+    let (_response, _used) = client
+        .request(
+            stream,
+            "example.com",
+            HttpClientRequest {
+                method: HttpMethod::GET,
+                host: "example.com",
+                path: "/",
+                headers: &[],
+                body: None,
+            },
+            &mut response_buffer,
+        )
+        .await
+    // Unverified instead: `DefaultHttpTlsClient::unverified(rng)` — no certificate checks.
+}
+```
+
+With `features = ["smoltcp"]`, wrap a connected or accepted `smoltcp` TCP socket with `SmolTcpStream` and pass it to `HttpClient`, `HttpTlsClient`, `HttpServer`, or `handle_http_connection()`. Your application still owns the `smoltcp` interface/device polling and socket lifecycle.
+
+```rust,ignore
+use nanofish::{HttpClient, SmolTcpStream};
+
+async fn request(socket: &mut smoltcp::socket::tcp::Socket<'_>) -> Result<(), nanofish::Error> {
+    let mut stream = SmolTcpStream::new(socket);
+    let client = HttpClient::new();
+    let mut response = [0; 1024];
+
+    let (_response, _used) = client
+        .get(&mut stream, "example.com", "/", &[], &mut response)
+        .await?;
+
+    Ok(())
+}
+```
+
+```rust,ignore
+use nanofish::{HttpClient, HttpClientRequest, HttpMethod};
+
+async fn request_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    let client = HttpClient::new();
+    let mut response_buffer = [0u8; 4096];
+
+    let (response, bytes_read) = client.request(
+        stream,
+        HttpClientRequest {
+            method: HttpMethod::GET,
+            host: "example.com",
+            path: "/api/status",
+            headers: &[],
+            body: None,
+        },
+        &mut response_buffer,
+    ).await?;
+
+    Ok(())
+}
+```
+
+## Quick Start
+
+Here's a simple example showing how to use the Embassy-backed client (`features = ["embassy"]`):
+
+```rust,ignore
+use nanofish::{DefaultEmbassyHttpClient, HttpHeader, ResponseBody, headers, mime_types};
 use embassy_net::Stack;
 
 async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
-    let client = DefaultHttpClient::new(stack);
+    let client = DefaultEmbassyHttpClient::new(stack);
     let mut response_buffer = [0u8; 8192];
     let headers = [
-        HttpHeader::user_agent("Nanofish/0.12"),
+        HttpHeader::user_agent("Nanofish/0.13"),
         HttpHeader::content_type(mime_types::JSON),
         HttpHeader::authorization("Bearer token123"),
     ];
@@ -279,16 +399,16 @@ All methods return a `Result<(HttpResponse, usize), Error>` where:
 Just like the server, you can choose different client sizes:
 
 ```rust,ignore
-use nanofish::{DefaultHttpClient, SmallHttpClient, HttpClient};
+use nanofish::{DefaultEmbassyHttpClient, SmallEmbassyHttpClient, EmbassyHttpClient};
 
 // Default client (4KB buffers) - good for most use cases
-let client = DefaultHttpClient::new(stack);
+let client = DefaultEmbassyHttpClient::new(stack);
 
 // Small client (1KB buffers) - for memory-constrained devices  
-let client = SmallHttpClient::new(stack);
+let client = SmallEmbassyHttpClient::new(stack);
 
 // Custom client with your own buffer sizes
-type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
+type CustomClient<'a> = EmbassyHttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
 //                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE ↑ REQUEST
 //                                           TLS_READ ↑
 let client = CustomClient::new(stack);
@@ -337,10 +457,29 @@ For streaming endpoints such as server-sent events, use the `Content-Type: text/
 
 > **Important Note**: The server only supports plain HTTP connections, not HTTPS/TLS. While the Nanofish client supports both HTTP and HTTPS, the server implementation is HTTP-only. For secure connections in production, use a reverse proxy (like nginx) or load balancer that handles TLS termination.
 
-### Basic Server Usage
+### Generic IO Server Without Embassy
+
+With `default-features = false`, use `HttpServer` or `handle_http_connection()` to serve one request/response cycle over any `embedded-io-async` stream. This is the non-Embassy server implementation that lives alongside the default Embassy-backed `DefaultEmbassyHttpServer`. Your platform owns listening, accepting, timeouts, and connection lifecycle.
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode};
+use nanofish::{DefaultHttpServer, SimpleHandler};
+
+async fn serve_one_without_embassy<S>(stream: &mut S) -> Result<(), nanofish::Error>
+where
+    S: embedded_io_async::Read + embedded_io_async::Write,
+{
+    let mut handler = SimpleHandler;
+    let server = DefaultHttpServer::new();
+    server.handle_connection(stream, &mut handler).await
+}
+```
+
+### Basic Server Usage
+
+This example uses the Embassy-backed server (`features = ["embassy"]`).
+
+```rust,ignore
+use nanofish::{DefaultEmbassyHttpServer, HttpHandler, HttpRequest, HttpResponse, ResponseBody, StatusCode};
 use embassy_net::Stack;
 
 // Create a simple request handler
@@ -369,7 +508,7 @@ impl HttpHandler for MyHandler {
 }
 
 async fn run_server(stack: Stack<'_>) -> Result<(), nanofish::Error> {
-    let mut server = DefaultHttpServer::new(80);  // Listen on port 80
+    let mut server = DefaultEmbassyHttpServer::new(80);  // Listen on port 80
     let handler = MyHandler;
     
     // This runs forever, handling requests
@@ -472,16 +611,16 @@ impl HttpHandler for DynamicHandler {
 Just like the client, you can choose different server sizes:
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, SmallHttpServer, HttpServer};
+use nanofish::{DefaultEmbassyHttpServer, SmallEmbassyHttpServer, EmbassyHttpServer};
 
 // Default server (4KB buffers) - good for most use cases
-let server = DefaultHttpServer::new(80);
+let server = DefaultEmbassyHttpServer::new(80);
 
 // Small server (1KB buffers) - for memory-constrained devices  
-let server = SmallHttpServer::new(80);
+let server = SmallEmbassyHttpServer::new(80);
 
 // Custom server with your own buffer sizes
-type MyServer = HttpServer<2048, 2048, 1024, 8192>;  // RX, TX, Request, Response buffer sizes
+type MyServer = EmbassyHttpServer<2048, 2048, 1024, 8192>;  // RX, TX, Request, Response buffer sizes
 let server = MyServer::new(80);
 ```
 
@@ -490,18 +629,19 @@ let server = MyServer::new(80);
 You can customize how long the server waits for different operations:
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, ServerTimeouts};
+use nanofish::{DefaultEmbassyHttpServer, ServerTimeouts, TimeoutDuration};
 
 // Default timeouts: 10s accept, 30s read, 60s handler
-let server = DefaultHttpServer::new(80);
+let server = DefaultEmbassyHttpServer::new(80);
 
 // Custom timeouts
 let timeouts = ServerTimeouts::new(
-    5,   // 5 seconds to accept new connections
-    15,  // 15 seconds to read request data
-    30   // 30 seconds for your handler to process requests
+    TimeoutDuration::from_secs(5),   // 5 seconds to accept new connections
+    TimeoutDuration::from_secs(15),  // 15 seconds of socket inactivity while
+                                     // reading/writing a request
+    TimeoutDuration::from_secs(30)   // 30 seconds for your handler to process requests
 );
-let server = DefaultHttpServer::with_timeouts(80, timeouts);
+let server = DefaultEmbassyHttpServer::with_timeouts(80, timeouts);
 ```
 
 ### Request Information
@@ -542,10 +682,10 @@ impl HttpHandler for MyHandler {
 For quick testing, you can use the built-in `SimpleHandler`:
 
 ```rust,ignore
-use nanofish::{DefaultHttpServer, SimpleHandler};
+use nanofish::{DefaultEmbassyHttpServer, SimpleHandler};
 
 async fn run_test_server(stack: Stack<'_>) {
-    let mut server = DefaultHttpServer::new(8080);
+    let mut server = DefaultEmbassyHttpServer::new(8080);
     let handler = SimpleHandler;  // Serves "/" and "/health" endpoints
     
     server.serve(stack, handler).await;
